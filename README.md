@@ -1,2 +1,5 @@
 # Ticket_Automate_pipeline
-It cleans raw data and turns it into clean one.
+# Support Ticket Pipeline
+
+A data pipeline for extracting, cleaning, and reporting support ticket data.
+

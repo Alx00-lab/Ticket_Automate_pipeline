@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 import logging
 from pathlib import Path
-from typing import Final, FrozenSet, Tuple
+from typing import Final, FrozenSet, Optional, Tuple
 import pandas as pd
 
 
@@ -36,11 +36,15 @@ EXPECTED_COLUMNS: Final[Tuple[str, ...]] = (
 
 # 2. Domain Categorical Expectations
 VALID_STATUSES: Final[FrozenSet[str]] = frozenset(
-    {"OPEN", "IN_PROGRESS", "ON_HOLD", "RESOLVED", "CLOSED_NO_ACTION"}
+    {"open", "in_progress", "on_hold", "resolved", "closed_no_action"}
 )
 
 VALID_PRIORITIES: Final[FrozenSet[str]] = frozenset(
-    {"LOW", "MEDIUM", "HIGH", "URGENT"}
+    {"low", "medium", "high", "urgent"}
+)
+
+TERMINAL_STATUSES: Final[FrozenSet[str]] = frozenset(
+    {"resolved", "closed_no_action"}
 )
 
 # 3. Volume Lower Bound (Safety margin against truncated upstream exports)
@@ -115,7 +119,7 @@ def extract_raw_tickets(file_path: str | Path) -> pd.DataFrame:
     # 4. Parse Dates (Validation only, don't mutate raw DF)
     # ------------------------------------------------------
     parsed_dates = pd.to_datetime(df_raw["created_at"], errors="coerce", utc=True)
-    unparseable_count = parsed_dates.isna().sum()
+    unparseable_count = int(parsed_dates.isna().sum())
 
     if unparseable_count > 0:
         logger.warning(
@@ -126,6 +130,9 @@ def extract_raw_tickets(file_path: str | Path) -> pd.DataFrame:
     # --------------------------
     # 5. Confirm Temporal Bounds
     # --------------------------
+    min_date: Optional[datetime] = None
+    max_date: Optional[datetime] = None
+
     valid_dates = parsed_dates.dropna()
     if not valid_dates.empty:
         min_date = valid_dates.min()
@@ -137,9 +144,9 @@ def extract_raw_tickets(file_path: str | Path) -> pd.DataFrame:
                 f"Observed Range: [{min_date}] to [{max_date}]\n"
                 f"Expected Range: [{MIN_EXPECTED_DATE}] to [{MAX_EXPECTED_DATE}]"
             )
-        else:
-            min_date, max_date = None, None
-            logger.warning("No valid dates found in 'created_at' column to inspect bounds.")
+    else:
+        min_date, max_date = None, None
+        logger.warning("No valid dates found in 'created_at' column to inspect bounds.")
 
     
     # -------------
@@ -155,12 +162,27 @@ def extract_raw_tickets(file_path: str | Path) -> pd.DataFrame:
         )
     
     # Priority Check
-    actual_priorities = set(df_raw["prority"].dropna().unique())
+    actual_priorities = set(df_raw["priority"].dropna().unique())
     unexpected_priorities = actual_priorities - VALID_PRIORITIES
     if unexpected_priorities:
         logger.warning(
             f"New/Unexpected Priority values observed in data: {unexpected_priorities}. "
-            f"Allowed known priorities: {set(VALID_PRIORITIES)}"
+            f"known priorities: {set(VALID_PRIORITIES)}"
+        )
+
+    # ----------------------------------------------------
+    # Domain Integrity Checks (Resolution Time vs. Status)
+    # ----------------------------------------------------
+
+    res_time_numeric = pd.to_numeric(df_raw["resolution_time_hours"], errors="coerce")
+    is_terminal_ticket = df_raw["status"].isin(TERMINAL_STATUSES)
+
+    # Flag terminal tickets with zero or missing resolution time
+    terminal_invalid_res = df_raw[is_terminal_ticket & (res_time_numeric.fillna(0) <= 0)]
+    if not terminal_invalid_res.empty:
+        logger.warning(
+            f"Domain Integrity Anomaly: Found {len(terminal_invalid_res):,} terminal "
+            f"tickets ({set(TERMINAL_STATUSES)}) with 0 or missing resolution_time_hours."
         )
 
     # ------------------
@@ -168,14 +190,45 @@ def extract_raw_tickets(file_path: str | Path) -> pd.DataFrame:
     # ------------------
     logger.info("=" * 60)
     logger.info("EXTRACTION SUMMARY & SANITY CHECK COMPLETE")
-    logger.info(f"Total Rows Extracted : {total_rows:,}")
-    logger.info(f"Columns Verified     : {len(actual_columns)} (Matches Contract)")
-    logger.info(f"Date Min Observed    : {min_date}")
-    logger.info(f"Date Max Observed    : {max_date}")
-    logger.info(f"Unparseable Dates    : {unparseable_count:,}")
-    logger.info(f"Status Anomalies     : {unexpected_statuses if unexpected_statuses else 'None'}")
-    logger.info(f"Priority Anomalies   : {unexpected_priorities if unexpected_priorities else 'None'}")
+    logger.info(f"Total Rows Extracted  : {total_rows:,}")
+    logger.info(f"Columns Verified      : {len(actual_columns)} (Matches Contract)")
+    logger.info(f"Date Min Observed     : {min_date}")
+    logger.info(f"Date Max Observed     : {max_date}")
+    logger.info(f"Unparseable Dates     : {unparseable_count:,}")
+    logger.info(f"Status Anomalies      : {unexpected_statuses if unexpected_statuses else 'None'}")
+    logger.info(f"Priority Anomalies    : {unexpected_priorities if unexpected_priorities else 'None'}")
+    logger.info(f"Terminal Res Anomalies: {len(terminal_invalid_res):,}")
     logger.info("=" * 60)
 
     # Last: Return Pure Raw Data
     return df_raw
+
+
+# ---------------------------------
+# Local Testing Entry Point 
+# ---------------------------------
+if __name__ == "__main__":
+    logging.basicConfig(
+        level= logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s"
+    )
+
+    LOCAL_CSV_PATH = Path("C:\\Users\\Alexander\\Desktop\\Ticket_Automate_pipeline\\Ticket_Automate_pipeline\\data\\raw\\synthetic_it_support_tickets.csv")
+
+    try:
+        logger.info("--- STARTING LOCAL TEST RUN ---")
+
+        # Pass the path to out function
+        df = extract_raw_tickets(LOCAL_CSV_PATH)
+
+        logger.info("--- TEST RUN SUCCESSFUL ---")
+        logger.info(f"Final DataFrame Shape in memory: {df.shape}")
+    
+    except Exception as e:
+        logger.critical(f"--- TEST RUN FAILED ---")
+        logger.critical(f"Error Details: {e}")
+
+
+# -----------------
+# END -------------
+# -----------------
